@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KINETIC // Root Backup Vault</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="kinetic-container">
+    <header class="kinetic-header">
+      <div>
+        <span class="kinetic-tag">TemplateMo 631 Kinetic UI // MongoDB Atlas</span>
+        <h1 class="kinetic-title">Kinetic Backup Vault</h1>
+      </div>
+      <button class="btn btn-danger" onclick="dropEntireDB()">
+        Drop Entire DB
+      </button>
+    </header>
+
+    <div id="statusBanner" class="status-banner"></div>
+
+    <div class="kinetic-grid">
+      <!-- Left Column: Controls -->
+      <div>
+        <!-- Create Folder in /root -->
+        <div class="kinetic-card" style="margin-bottom: 1.5rem;">
+          <div class="card-title">
+            <span>01 / Create Folder</span>
+            <span class="root-badge">DIR: /root</span>
+          </div>
+          <form id="folderForm" onsubmit="createFolder(event)">
+            <div class="form-group">
+              <label for="folderName">New Folder Name (No Conflicts Allowed)</label>
+              <input type="text" id="folderName" placeholder="e.g. prod_snapshots_2026" required />
+            </div>
+            <button type="submit" class="btn btn-kinetic">Create in /root</button>
+          </form>
+        </div>
+
+        <!-- Upload File to Folder (Max 25MB) -->
+        <div class="kinetic-card">
+          <div class="card-title">
+            <span>02 / Upload Backup</span>
+            <span class="root-badge">MAX: 25MB</span>
+          </div>
+          <form id="uploadForm" onsubmit="uploadFile(event)">
+            <div class="form-group">
+              <label for="targetFolder">Target Folder in /root</label>
+              <select id="targetFolder" required>
+                <option value="">-- Create a folder first --</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="fileInput">Select File (Max 25MB per POST)</label>
+              <input type="file" id="fileInput" required />
+            </div>
+            <button type="submit" id="uploadBtn" class="btn btn-kinetic">Upload to MongoDB Atlas</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- Right Column: /root Directory Explorer -->
+      <div class="kinetic-card">
+        <div class="card-title">
+          <span>03 / Vault Explorer</span>
+          <span class="root-badge">/root/*</span>
+        </div>
+        <div id="vaultTree">Loading backup state...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const MAX_BYTES = 25 * 1024 * 1024; // 25MB client pre-check
+
+    function showStatus(msg, isError = false) {
+      const banner = document.getElementById('statusBanner');
+      banner.textContent = msg;
+      banner.className = isError ? 'status-banner error' : 'status-banner';
+      banner.style.display = 'block';
+    }
+
+    function formatBytes(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / 1048576).toFixed(2) + ' MB';
+    }
+
+    async function loadState() {
+      const res = await fetch('/api/state');
+      const data = await res.json();
+
+      const select = document.getElementById('targetFolder');
+      select.innerHTML = '';
+      if (data.folders.length === 0) {
+        select.innerHTML = '<option value="">-- Create a folder first --</option>';
+      } else {
+        data.folders.forEach(f => {
+          const opt = document.createElement('option');
+          opt.value = f.name;
+          opt.textContent = `/root/${f.name}`;
+          select.appendChild(opt);
+        });
+      }
+
+      const tree = document.getElementById('vaultTree');
+      if (data.folders.length === 0) {
+        tree.innerHTML = '<p style="color: var(--text-muted);">No folders inside /root yet. Create one on the left to start backing up files.</p>';
+        return;
+      }
+
+      tree.innerHTML = data.folders.map(folder => {
+        const folderFiles = data.files.filter(f => f.folder === folder.name);
+        const filesHTML = folderFiles.length === 0
+          ? '<div style="color: var(--text-muted); font-size: 0.85rem;">Empty folder</div>'
+          : folderFiles.map(file => {
+              const encodedFolder = encodeURIComponent(folder.name);
+              const encodedFile = encodeURIComponent(file.filename);
+              return `
+                <div class="file-row">
+                  <div>
+                    <strong>${file.filename}</strong>
+                    <span class="file-meta">(${formatBytes(file.size)})</span>
+                  </div>
+                  <div style="display:flex; gap:0.4rem;">
+                    <a class="btn btn-outline btn-sm" href="/api/files/${encodedFolder}/${encodedFile}" target="_blank">Read</a>
+                    <a class="btn btn-outline btn-sm" href="/api/files/${encodedFolder}/${encodedFile}?download=1">Download</a>
+                  </div>
+                </div>
+              `;
+            }).join('');
+
+        return `
+          <div class="folder-block">
+            <div class="folder-header">
+              <span class="folder-path">/root/${folder.name}</span>
+              <button class="btn btn-danger btn-sm" onclick="wipeFolder('${folder.name}')">
+                Wipe Folder
+              </button>
+            </div>
+            <div>${filesHTML}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function createFolder(e) {
+      e.preventDefault();
+      const input = document.getElementById('folderName');
+      const name = input.value.trim();
+
+      const res = await fetch('/api/folders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        showStatus(data.error || 'Failed to create folder', true);
+        return;
+      }
+      input.value = '';
+      showStatus(`Created folder /root/${data.name}`);
+      loadState();
+    }
+
+    async function uploadFile(e) {
+      e.preventDefault();
+      const folder = document.getElementById('targetFolder').value;
+      const fileInput = document.getElementById('fileInput');
+      const file = fileInput.files[0];
+
+      if (!folder) {
+        showStatus('Please create and select a folder in /root first.', true);
+        return;
+      }
+      if (!file) return;
+
+      if (file.size > MAX_BYTES) {
+        showStatus(`Client Validation: File is ${formatBytes(file.size)}, which exceeds the 25MB max payload limit.`, true);
+        return;
+      }
+
+      const btn = document.getElementById('uploadBtn');
+      btn.disabled = true;
+      btn.textContent = 'Uploading to Atlas...';
+
+      const formData = new FormData();
+      formData.append('folder', folder);
+      formData.append('file', file);
+
+      try {
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showStatus(data.error || 'Upload failed', true);
+        } else {
+          fileInput.value = '';
+          showStatus(`Backed up '${data.filename}' (${formatBytes(data.size)}) to /root/${data.folder}`);
+          loadState();
+        }
+      } catch (err) {
+        showStatus('Network error or payload rejected by server (>25MB).', true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Upload to MongoDB Atlas';
+      }
+    }
+
+    async function wipeFolder(folderName) {
+      if (!confirm(`Wipe folder /root/${folderName} and all backups inside it?`)) return;
+      const res = await fetch(`/api/folders/${encodeURIComponent(folderName)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) {
+        showStatus(data.error || 'Failed to wipe folder', true);
+        return;
+      }
+      showStatus(data.message);
+      loadState();
+    }
+
+    async function dropEntireDB() {
+      if (!confirm('CRITICAL: Are you sure you want to DROP the entire MongoDB backup database?')) return;
+      const res = await fetch('/api/db', { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) {
+        showStatus(data.error || 'Failed to drop database', true);
+        return;
+      }
+      showStatus(data.message);
+      loadState();
+    }
+
+    loadState();
+  </script>
+</body>
+</html>
